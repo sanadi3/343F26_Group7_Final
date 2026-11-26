@@ -176,7 +176,23 @@ def get_sensitivities(X, R_C, R_E):
 
     Units are those of Y per ohm, so the I_CC column is in mA/ohm.
     """
-    raise NotImplementedError("TODO")
+    n = len(X)
+    dY_dRC = np.zeros((n, 4))
+    dY_dRE = np.zeros((n, 4))
+
+    for i in range(n):
+        VB, VC, VE = X[i]
+        J = get_jac(X[i], R_C, R_E)
+        dF_dRC = np.array([0.0, (VCC - VC) / R_C**2, 0.0])
+        dF_dRE = np.array([0.0, 0.0, -VE / R_E**2])
+        dx_dRC = np.linalg.solve(J, -dF_dRC)
+        dx_dRE = np.linalg.solve(J, -dF_dRE)
+        dY_dRC[i, :3] = dx_dRC
+        dY_dRE[i, :3] = dx_dRE
+        dY_dRC[i, 3] = 1e3 * (-dx_dRC[1] / R_C - (VCC - VC) / R_C**2)
+        dY_dRE[i, 3] = 1e3 * (-dx_dRE[1] / R_C)
+
+    return dY_dRC, dY_dRE
 
 
 def fit_residual(R_C, R_E, Y_meas, cols):
@@ -186,12 +202,33 @@ def fit_residual(R_C, R_E, Y_meas, cols):
     m x 2 matrix with columns R_C dY/dR_C and R_E dY/dR_E, same stacking.  If
     Newton fails inside the sweep just let the RuntimeError through.
     """
-    raise NotImplementedError("TODO")
+    cols = list(cols)
+    X, _ = dc_sweep(R_C, R_E)
+    Y = measure(X, R_C)
+    dY_dRC, dY_dRE = get_sensitivities(X, R_C, R_E)
+    r = (Y_meas - Y)[:, cols].ravel()
+    J_r = np.column_stack([R_C * dY_dRC[:, cols].ravel(),
+                           R_E * dY_dRE[:, cols].ravel()])
+    return r, J_r
 
 
 def house_lstsq(A, b):
     """TODO 2(b). min ||A beta - b||_2 by Householder QR (your PS4 code)."""
-    raise NotImplementedError("TODO")
+    R = np.array(A, dtype=float)
+    c = np.array(b, dtype=float)
+    m, n = R.shape
+    for k in range(n):
+        a = R[k:, k]
+        sign = 1.0 if a[0] >= 0 else -1.0
+        v = a.copy()
+        v[0] += sign * np.linalg.norm(a)
+        vv = v @ v
+        R[k:, k:] -= np.outer(2 * v / vv, v @ R[k:, k:])
+        c[k:] -= (2 * (v @ c[k:]) / vv) * v
+    beta = np.zeros(n)
+    for i in range(n - 1, -1, -1):
+        beta[i] = (c[i] - R[i, i + 1:] @ beta[i + 1:]) / R[i, i]
+    return beta
 
 
 def gauss_newton(RC_guess, RE_guess, Y_meas, cols=(0, 1, 2, 3), max_iter=30, tol=1e-8):
@@ -205,7 +242,33 @@ def gauss_newton(RC_guess, RE_guess, Y_meas, cols=(0, 1, 2, 3), max_iter=30, tol
         'cost', 'r', 'J_r'   at the final estimates (cost = 0.5 ||r||^2)
         'path'          list of (R_C, R_E) visited, guess first
     """
-    raise NotImplementedError("TODO")
+    R_C, R_E = float(RC_guess), float(RE_guess)
+    path = [(R_C, R_E)]
+    iters = 0
+    converged = False
+    r, J_r = None, None
+
+    try:
+        r, J_r = fit_residual(R_C, R_E, Y_meas, cols)
+        while iters < max_iter:
+            beta = house_lstsq(J_r, r)
+            R_C = R_C * np.exp(beta[0])
+            R_E = R_E * np.exp(beta[1])
+            iters += 1
+            path.append((R_C, R_E))
+            if not (10.0 <= R_C <= 1e6 and 10.0 <= R_E <= 1e6):
+                break
+
+            r, J_r = fit_residual(R_C, R_E, Y_meas, cols)
+            if np.linalg.norm(beta) < tol:
+                converged = True
+                break
+    except RuntimeError:
+        pass
+
+    cost = np.nan if r is None else 0.5 * (r @ r)
+    return {'R_C': R_C, 'R_E': R_E, 'iters': iters, 'converged': converged,
+            'cost': cost, 'r': r, 'J_r': J_r, 'path': path}
 
 
 def error_propagation(r, J_r):
@@ -214,4 +277,15 @@ def error_propagation(r, J_r):
     Return a dict with 's', 'sigma_mle', 'cov' (2x2), 'u' (u_C, u_E), 'rho'
     and 'kappa', defined as in the handout.
     """
-    raise NotImplementedError("TODO")
+    m = len(r)
+    rr = r @ r
+    s = np.sqrt(rr / (m - 2))
+    cov = s**2 * np.linalg.inv(J_r.T @ J_r)
+    u = np.sqrt(np.diag(cov))
+
+    return {'s': s,
+            'sigma_mle': np.sqrt(rr / m),   
+            'cov': cov,
+            'u': u,
+            'rho': cov[0, 1] / (u[0] * u[1]),
+            'kappa': np.linalg.cond(J_r)}
